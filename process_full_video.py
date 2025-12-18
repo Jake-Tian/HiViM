@@ -6,7 +6,7 @@ from classes.hetero_graph import HeteroGraph
 from utils.llm import generate_text_response
 from utils.mllm_pictures import generate_messages, get_response
 from utils.prompts import prompt_generate_episodic_memory, prompt_extract_triples
-from utils.general import strip_code_fences
+from utils.general import strip_code_fences, load_video_list
 
 
 def process_full_video(frames_dir, output_graph_path=None, output_episodic_memory_path=None):
@@ -128,9 +128,25 @@ def process_full_video(frames_dir, output_graph_path=None, output_episodic_memor
 
 def main():
     """Main function to process video frames."""
-    frames_dir = Path("data/frames/gym_01")
-    graph, episodic_memory = process_full_video(frames_dir)
-    print(f"\n✓ Processing complete. Graph has {len(graph.characters)} characters and {len(graph.edges)} edges.")
+    import sys
+    
+    video_names = load_video_list()
+    
+    # Parse range from command line (e.g., "1-20" or "21-40")
+    if len(sys.argv) > 1:
+        start, end = map(int, sys.argv[1].split('-'))
+        selected = video_names[start-1:end]
+    else:
+        selected = video_names
+    
+    for video_name in selected:
+        frames_dir = Path(f"data/frames/{video_name}")
+        if not frames_dir.exists():
+            print(f"Skipping {video_name}: frames not found")
+            continue
+        print(f"\nProcessing {video_name}...")
+        graph, episodic_memory = process_full_video(frames_dir)
+        print(f"✓ {video_name} complete. Graph has {len(graph.characters)} characters and {len(graph.edges)} edges.")
 
 
 if __name__ == "__main__":

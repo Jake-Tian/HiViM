@@ -1,6 +1,7 @@
 """
 General utility helpers.
 """
+from pathlib import Path
 
 def strip_code_fences(text: str) -> str:
     """
@@ -22,4 +23,15 @@ def strip_code_fences(text: str) -> str:
             lines = lines[:-1]
         stripped = "\n".join(lines).strip()
     return stripped
+
+
+def load_video_list(video_list_path="video_list.txt"):
+    """Load video names from video_list.txt."""
+    video_names = []
+    with open(video_list_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                video_names.append(line)
+    return video_names
 
