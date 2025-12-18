@@ -280,14 +280,17 @@ def process_video_with_subtitles(video_path: Path, srt_path: Path,
 
 
 def main():
-    """Process one video with matching subtitle file.
+    """Process videos with matching subtitle files.
     
     Usage:
         python add_subtitles_and_extract_frames.py [video_name]
         
+    If no video_name is provided, processes all videos in data/videos that have
+    matching subtitle files in data/subtitles/robot.
+        
     Examples:
-        python add_subtitles_and_extract_frames.py bedroom_01
-        python add_subtitles_and_extract_frames.py gym_01
+        python add_subtitles_and_extract_frames.py bedroom_01  # Process single video
+        python add_subtitles_and_extract_frames.py              # Process all videos
     """
     import sys
     
@@ -296,73 +299,105 @@ def main():
     subtitles_dir = Path("data/subtitles/robot")
     frames_base_dir = Path("data/frames")
     
-    # Get video name from command line argument
+    # Get video name from command line argument (if provided)
     if len(sys.argv) > 1:
-        video_name = sys.argv[1]
-        # Remove .mp4 extension if provided
-        video_name = video_name.replace('.mp4', '')
+        # Process single video
+        video_name = sys.argv[1].replace('.mp4', '')
+        video_path = videos_dir / f"{video_name}.mp4"
+        srt_path = subtitles_dir / f"{video_name}.srt"
+        output_frames_dir = frames_base_dir / video_name
+        
+        if not video_path.exists():
+            print(f"✗ Video file not found: {video_path}")
+            return
+        
+        if not srt_path.exists():
+            print(f"✗ Subtitle file not found: {srt_path}")
+            return
+        
+        print(f"\n{'='*60}")
+        print(f"Processing: {video_name}")
+        print(f"{'='*60}")
+        print(f"Video: {video_path}")
+        print(f"Subtitles: {srt_path}")
+        print(f"Output: {output_frames_dir}")
+        print(f"{'='*60}\n")
+        
+        try:
+            frames_saved = process_video_with_subtitles(
+                video_path=video_path,
+                srt_path=srt_path,
+                output_frames_dir=output_frames_dir,
+                frames_per_second=1
+            )
+            print(f"\n✓ Successfully processed {video_name}: {frames_saved} frames saved")
+        except Exception as e:
+            print(f"\n✗ Error processing {video_name}: {e}")
+            import traceback
+            traceback.print_exc()
     else:
-        # If no argument, list available videos and ask user
+        # Process all videos with matching subtitle files
         video_files = list(videos_dir.glob("*.mp4"))
         if not video_files:
             print("No video files found in data/videos/")
             return
         
-        print("Available videos:")
-        for i, vf in enumerate(video_files, 1):
-            print(f"  {i}. {vf.stem}")
-        
-        try:
-            choice = input("\nEnter video number or name: ").strip()
-            # Try to parse as number
-            if choice.isdigit():
-                idx = int(choice) - 1
-                if 0 <= idx < len(video_files):
-                    video_name = video_files[idx].stem
-                else:
-                    print(f"Invalid number. Please choose 1-{len(video_files)}")
-                    return
+        # Find videos with matching subtitle files
+        videos_to_process = []
+        for video_file in video_files:
+            video_name = video_file.stem
+            srt_path = subtitles_dir / f"{video_name}.srt"
+            if srt_path.exists():
+                videos_to_process.append((video_name, video_file, srt_path))
             else:
-                video_name = choice.replace('.mp4', '')
-        except KeyboardInterrupt:
-            print("\nCancelled.")
+                print(f"⚠ Skipping {video_name}: No matching subtitle file found")
+        
+        if not videos_to_process:
+            print("No videos with matching subtitle files found.")
             return
-    
-    # Construct paths
-    video_path = videos_dir / f"{video_name}.mp4"
-    srt_path = subtitles_dir / f"{video_name}.srt"
-    output_frames_dir = frames_base_dir / video_name
-    
-    # Check if video exists
-    if not video_path.exists():
-        print(f"✗ Video file not found: {video_path}")
-        return
-    
-    # Check if subtitle exists
-    if not srt_path.exists():
-        print(f"✗ Subtitle file not found: {srt_path}")
-        return
-    
-    print(f"\n{'='*60}")
-    print(f"Processing: {video_name}")
-    print(f"{'='*60}")
-    print(f"Video: {video_path}")
-    print(f"Subtitles: {srt_path}")
-    print(f"Output: {output_frames_dir}")
-    print(f"{'='*60}\n")
-    
-    try:
-        frames_saved = process_video_with_subtitles(
-            video_path=video_path,
-            srt_path=srt_path,
-            output_frames_dir=output_frames_dir,
-            frames_per_second=1
-        )
-        print(f"\n✓ Successfully processed {video_name}: {frames_saved} frames saved")
-    except Exception as e:
-        print(f"\n✗ Error processing {video_name}: {e}")
-        import traceback
-        traceback.print_exc()
+        
+        print(f"\n{'='*60}")
+        print(f"Found {len(videos_to_process)} video(s) with matching subtitles")
+        print(f"{'='*60}\n")
+        
+        # Process each video
+        successful = 0
+        failed = 0
+        
+        for i, (video_name, video_path, srt_path) in enumerate(videos_to_process, 1):
+            output_frames_dir = frames_base_dir / video_name
+            
+            print(f"\n{'='*60}")
+            print(f"[{i}/{len(videos_to_process)}] Processing: {video_name}")
+            print(f"{'='*60}")
+            print(f"Video: {video_path}")
+            print(f"Subtitles: {srt_path}")
+            print(f"Output: {output_frames_dir}")
+            print(f"{'='*60}\n")
+            
+            try:
+                frames_saved = process_video_with_subtitles(
+                    video_path=video_path,
+                    srt_path=srt_path,
+                    output_frames_dir=output_frames_dir,
+                    frames_per_second=1
+                )
+                print(f"\n✓ Successfully processed {video_name}: {frames_saved} frames saved")
+                successful += 1
+            except Exception as e:
+                print(f"\n✗ Error processing {video_name}: {e}")
+                import traceback
+                traceback.print_exc()
+                failed += 1
+        
+        # Summary
+        print(f"\n{'='*60}")
+        print(f"Processing Summary")
+        print(f"{'='*60}")
+        print(f"Total videos: {len(videos_to_process)}")
+        print(f"Successful: {successful}")
+        print(f"Failed: {failed}")
+        print(f"{'='*60}")
 
 
 if __name__ == "__main__":
