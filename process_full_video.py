@@ -42,80 +42,110 @@ def process_full_video(frames_dir, output_graph_path=None, output_episodic_memor
     graph = HeteroGraph()
     
     for folder in image_folders:
-        print("--------------------------------")
-        print("Processing folder: ", folder)
-        clip_id = int(folder.split("/")[-1])
-        response_dict = dict()
-        # Collect images in the current folder
-        current_images = sorted(
-            glob.glob(f"{folder}/*.jpg"),
-            key=lambda p: int(Path(p).stem) if Path(p).stem.isdigit() else p,
-        )
-
-        #--------------------------------
-        # Episodic Memory
-        #--------------------------------
-        prompt = "Character appearance from previous videos: \n" + character_appearance + "\n" + prompt_generate_episodic_memory
-        messages = generate_messages(current_images, prompt)
         try:
-            response = get_response(messages)
+            print("--------------------------------")
+            print("Processing folder: ", folder)
+            clip_id = int(folder.split("/")[-1])
+            response_dict = dict()
+            # Collect images in the current folder
+            current_images = sorted(
+                glob.glob(f"{folder}/*.jpg"),
+                key=lambda p: int(Path(p).stem) if Path(p).stem.isdigit() else p,
+            )
+
+            #--------------------------------
+            # Episodic Memory
+            #--------------------------------
+            prompt = "Character appearance from previous videos: \n" + character_appearance + "\n" + prompt_generate_episodic_memory
+            messages = generate_messages(current_images, prompt)
+            try:
+                response = get_response(messages)
+            except Exception as e:
+                print(f"LLM call failed, retrying... Error: {e}")
+                response = get_response(messages)
+            # print(response)
+            response = strip_code_fences(response)
+            response_dict = json.loads(response)
+
+            # 1. Process the character's behavior
+            behaviors = response_dict["characters_behavior"]
+            if behaviors and len(behaviors) > 0 and behaviors[0].startswith("Equivalence:"):
+                equivalence = behaviors[0].split(":")[1].split(",")
+                behaviors = behaviors[1:]
+                graph.rename_character(equivalence[0].strip(), equivalence[1].strip())
+
+            # 2. Process the character appearance
+            character_appearance = response_dict["character_appearance"]
+            for character in character_appearance:
+                if character not in graph.characters:
+                    graph.add_character(character)
+
+            # 3. Process the conversation
+            conversation = response_dict["conversation"]
+
+            if len(conversation) > 0:
+                graph.update_conversation(clip_id, conversation, previous_conversation=previous_conversation)
+                previous_conversation = True  # Set to True for next iteration
+            else:
+                previous_conversation = False  # No conversation in this clip, reset for next iteration
+
+            scene = response_dict["scene"]
+
+            #--------------------------------
+            # Semantic Memory
+            #--------------------------------
+            behavior_prompt = prompt_extract_triples + "\n" + "\n".join(behaviors)
+            try:
+                triples_response = generate_text_response(behavior_prompt)
+            except Exception as e:
+                print(f"LLM call failed, retrying... Error: {e}")
+                triples_response = generate_text_response(behavior_prompt)
+
+            triples_response = strip_code_fences(triples_response)
+            triples = json.loads(triples_response)
+            graph.insert_triples(triples, clip_id, scene)
+            print(f"Inserted {len(triples)} triples into graph for clip {clip_id}")
+
+            character_appearance = json.dumps(character_appearance)
+
+            # Store episodic memory for this clip
+            episodic_memory[clip_id] = {
+                "folder": folder,
+                "characters_behavior": behaviors,
+                "conversation": conversation,
+                "character_appearance": character_appearance,
+                "scene": scene,
+                "triples": triples
+            }
         except Exception as e:
-            print(f"LLM call failed, retrying... Error: {e}")
-            response = get_response(messages)
-        # print(response)
-        response = strip_code_fences(response)
-        response_dict = json.loads(response)
+            print(f"✗ Error processing folder {folder}: {e}")
+            import traceback
+            traceback.print_exc()
+            print("Continuing to next folder...")
+            continue
 
-        # 1. Process the character's behavior
-        behaviors = response_dict["characters_behavior"]
-        if behaviors and len(behaviors) > 0 and behaviors[0].startswith("Equivalance:"):
-            equivalence = behaviors[0].split(":")[1].split(",")
-            behaviors = behaviors[1:]
-            graph.rename_character(equivalence[0].strip(), equivalence[1].strip())
+    # --------------------------------
+    # Abstract Memory
+    # --------------------------------
+    # Generate character attributes
+    print("Generating character attributes...")
+    print("Number of edges: ", len(graph.edges))
+    degrees = graph.get_node_degrees()
+    # Select all characters whose degree is greater than 10
+    characters = [character for character in graph.characters if degrees[character] > 10]
 
-        # 2. Process the character appearance
-        character_appearance = response_dict["character_appearance"]
-        for character in character_appearance:
-            if character not in graph.characters:
-                graph.add_character(character)
+    for character in characters:
+        graph.character_attributes(character)
+    print("Character attributes generated.")
+    print("Number of edges: ", len(graph.edges))
 
-        # 3. Process the conversation
-        conversation = response_dict["conversation"]
-
-        if len(conversation) > 0:
-            graph.update_conversation(clip_id, conversation, previous_conversation=previous_conversation)
-            previous_conversation = True  # Set to True for next iteration
-        else:
-            previous_conversation = False  # No conversation in this clip, reset for next iteration
-
-        scene = response_dict["scene"]
-
-        #--------------------------------
-        # Semantic Memory
-        #--------------------------------
-        behavior_prompt = prompt_extract_triples + "\n" + "\n".join(behaviors)
-        try:
-            triples_response = generate_text_response(behavior_prompt)
-        except Exception as e:
-            print(f"LLM call failed, retrying... Error: {e}")
-            triples_response = generate_text_response(behavior_prompt)
-
-        triples_response = strip_code_fences(triples_response)
-        triples = json.loads(triples_response)
-        graph.insert_triples(triples, clip_id, scene)
-        print(f"Inserted {len(triples)} triples into graph for clip {clip_id}")
-
-        character_appearance = json.dumps(character_appearance)
-
-        # Store episodic memory for this clip
-        episodic_memory[clip_id] = {
-            "folder": folder,
-            "characters_behavior": behaviors,
-            "conversation": conversation,
-            "character_appearance": character_appearance,
-            "scene": scene,
-            "triples": triples
-        }
+    # Generate character relationships
+    # pair up characters and generate relationships
+    for i in range(len(characters)-1):
+        for j in range(i+1, len(characters)):
+            graph.character_relationships(characters[i], characters[j])
+    print("Character relationships generated.")
+    print("Number of edges: ", len(graph.edges))
 
     # Save the graph to a file
     output_graph_path = Path(output_graph_path)
@@ -146,14 +176,23 @@ def main():
     else:
         selected = video_names
     
+    # selected = ["gym_01"] # Comment this out to process all videos
+
     for video_name in selected:
-        frames_dir = Path(f"data/frames/{video_name}")
-        if not frames_dir.exists():
-            print(f"Skipping {video_name}: frames not found")
+        try:
+            frames_dir = Path(f"data/frames/{video_name}")
+            if not frames_dir.exists():
+                print(f"Skipping {video_name}: frames not found")
+                continue
+            print(f"\nProcessing {video_name}...")
+            graph, episodic_memory = process_full_video(frames_dir)
+            print(f"✓ {video_name} complete. Graph has {len(graph.characters)} characters and {len(graph.edges)} edges.")
+        except Exception as e:
+            print(f"✗ Error processing video {video_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            print("Continuing to next video...")
             continue
-        print(f"\nProcessing {video_name}...")
-        graph, episodic_memory = process_full_video(frames_dir)
-        print(f"✓ {video_name} complete. Graph has {len(graph.characters)} characters and {len(graph.edges)} edges.")
 
 
 if __name__ == "__main__":

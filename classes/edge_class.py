@@ -7,13 +7,14 @@ class Edge:
         cls._id_counter += 1
         return cls._id_counter
 
-    def __init__(self, clip_id, source, target, content, scene):
+    def __init__(self, clip_id, source, target, content, scene, confidence=None):
         self.id = Edge.next_id()
         self.clip_id = clip_id
         self.source = source  
         self.target = target 
         self.content = content
         self.scene = scene
+        self.confidence = confidence
 
     def __repr__(self):
         return f"Edge({self.source} -> {self.target}, content={self.content})"

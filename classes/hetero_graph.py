@@ -1,10 +1,11 @@
-import numpy as np
+import json
 from .node_class import CharacterNode, ObjectNode
 from .edge_class import Edge
 from .conversation import Conversation
 from collections import defaultdict
-from utils.prompts import prompt_character_summary
+from utils.prompts import prompt_character_summary, prompt_character_relationships
 from utils.llm import generate_text_response
+from utils.general import strip_code_fences
 
 
 class HeteroGraph:
@@ -22,6 +23,7 @@ class HeteroGraph:
 
         robot = CharacterNode("<robot>")
         self.characters[robot.name] = robot
+
 
     # --------------------------------------------------------
     # Node API
@@ -132,12 +134,6 @@ class HeteroGraph:
     def get_neighbors(self, name):
         """
         Get all neighbors of a node (both incoming and outgoing).
-        
-        Args:
-            name: Node name (character or object)
-        
-        Returns:
-            set: Set of neighbor node names
         """
         result = set()
         
@@ -156,12 +152,6 @@ class HeteroGraph:
     def get_node_degrees(self):
         """
         Calculate the degree (number of connected edges) for each node in the graph.
-        Counts edges where the node appears as either source or target.
-        Uses adjacency lists for efficient computation.
-        
-        Returns:
-            dict: Mapping from node name (string) to degree (int)
-                  Includes both character nodes and object nodes
         """
         degrees = {}
         
@@ -179,13 +169,6 @@ class HeteroGraph:
     def _parse_node_string(self, node_str):
         """
         Parse a node string to determine if it's a character or object, and extract owner/attribute.
-        
-        Args:
-            node_str: String representation of a node (e.g., "<character_1>", "phone@<character_1>", "mug#white")
-        
-        Returns:
-            tuple: (is_character: bool, name: str, owner: str or None, attribute: str or None)
-                   For characters, name is returned WITH angle brackets to match storage format
         """
         if node_str is None:
             return (False, None, None, None)
@@ -249,13 +232,6 @@ class HeteroGraph:
     def _object_key_to_string(self, key):
         """
         Convert tuple key to string representation for edges.
-        
-        Args:
-            key: Tuple (name, owner, attribute) where owner and attribute can be None
-                 Owner should have angle brackets if it's a character reference
-        
-        Returns:
-            str: String representation like "name", "name@owner", "name#attribute", or "name@owner#attribute"
         """
         name, owner, attribute = key
         # Owner should already have angle brackets if it's a character reference (from parsing)
@@ -271,13 +247,6 @@ class HeteroGraph:
     def _string_to_object_key(self, node_str):
         """
         Parse a node string and return tuple key for object nodes.
-        For character nodes, returns None (they use simple string keys).
-        
-        Args:
-            node_str: String representation of a node
-        
-        Returns:
-            tuple or None: (name, owner, attribute) for objects, None for characters
         """
         is_char, name, owner, attribute = self._parse_node_string(node_str)
         if is_char:
@@ -287,12 +256,6 @@ class HeteroGraph:
     def _get_object_node_by_key(self, key):
         """
         Get an object node by tuple key.
-        
-        Args:
-            key: Tuple (name, owner, attribute)
-        
-        Returns:
-            ObjectNode or None
         """
         return self.objects.get(key)
     
@@ -300,12 +263,6 @@ class HeteroGraph:
         """
         Get an object node by its string representation.
         For character nodes, returns None (use get_character instead).
-        
-        Args:
-            node_str: String representation of the node (e.g., "phone@character_1")
-        
-        Returns:
-            ObjectNode or None
         """
         obj_key = self._string_to_object_key(node_str)
         if obj_key is None:
@@ -316,15 +273,6 @@ class HeteroGraph:
         """
         Get an existing object node or create a new one.
         Uniqueness is determined by name + owner + attribute combination (tuple key).
-        
-        Args:
-            name: Base name of the object
-            owner: Owner of the object (character name, without angle brackets)
-            attribute: Attribute of the object
-        
-        Returns:
-            tuple: (tuple_key, string_repr) where tuple_key is (name, owner, attribute) 
-                   and string_repr is the string representation for edges
         """
         # Create tuple key for uniqueness
         tuple_key = (name, owner, attribute)
@@ -395,9 +343,9 @@ class HeteroGraph:
                 # Source is an object - get or create (returns tuple_key, string_repr)
                 _, source_node_name = self._get_or_create_object_node(src_name, owner=src_owner, attribute=src_attr)
             
-            # Handle null/Null target - use "null" as target string but don't create object node
+            # Handle null/Null target - use None as target but don't create object node
             if target_str is None or (isinstance(target_str, str) and target_str.lower() == "null"):
-                target_node_name = "null"
+                target_node_name = None
             else:
                 # Parse target node
                 is_char_tgt, tgt_name, tgt_owner, tgt_attr = self._parse_node_string(target_str)
@@ -484,8 +432,8 @@ class HeteroGraph:
                 source_exists = True
         
         target_exists = False
-        # Special case: "null" is allowed as target without creating a node
-        if edge.target == "null" or edge.target == "Null":
+        # Special case: None is allowed as target without creating a node
+        if edge.target is None:
             target_exists = True
         # If target has angle brackets, it's a character; otherwise it's an object
         elif edge.target.startswith("<") and edge.target.endswith(">"):
@@ -506,7 +454,11 @@ class HeteroGraph:
         self.edges[edge.id] = edge
         # Add to both adjacency lists (edges are directed by default)
         self.adjacency_list_out[edge.source].append(edge.id)
-        self.adjacency_list_in[edge.target].append(edge.id)
+        # Handle None target for adjacency list
+        if edge.target is not None:
+            self.adjacency_list_in[edge.target].append(edge.id)
+        else:
+            self.adjacency_list_in[None].append(edge.id)
 
         return edge.id
 
@@ -514,41 +466,176 @@ class HeteroGraph:
         return self.edges.get(edge_id)
 
     def edges_from(self, node_id):
-        """
-        Get all edge IDs where the node is the source (outgoing edges).
-        
-        Args:
-            node_id: Node name
-        
-        Returns:
-            set: Set of edge IDs
-        """
         return set(self.adjacency_list_out[node_id])
 
     def edges_to(self, node_id):
-        """
-        Get all edge IDs where the node is the target (incoming edges).
-        
-        Args:
-            node_id: Node name
-        
-        Returns:
-            set: Set of edge IDs
-        """
         return set(self.adjacency_list_in[node_id])
 
     def edges_of(self, node_id):
-        """
-        Get all edge IDs connected to the node (both incoming and outgoing).
-        
-        Args:
-            node_id: Node name
-        
-        Returns:
-            set: Set of edge IDs
-        """
         return set(self.adjacency_list_out[node_id]) | set(self.adjacency_list_in[node_id])
 
+    def get_connected_edges(self, character1, character2):
+        """
+        Get all edges directly or indirectly connected between two characters.
+        
+        Direct connection: An edge where one character is source and the other is target (or vice versa).
+        Indirect connection: character1 connects to an object, and that object connects to character2,
+        where the clip_id difference between the two edges is less than 4.
+        Ownership connection: character1 interacts with an object that belongs to character2 (or vice versa).
+        
+        Args:
+            character1: First character name (with or without angle brackets, e.g., "<Alice>" or "Alice")
+            character2: Second character name (with or without angle brackets, e.g., "<Bob>" or "Bob")
+        
+        Returns:
+            list: List of Edge objects that are directly or indirectly connected between the two characters
+        """
+        # Normalize character names (add angle brackets if needed)
+        if not character1.startswith("<") or not character1.endswith(">"):
+            character1 = f"<{character1}>"
+        if not character2.startswith("<") or not character2.endswith(">"):
+            character2 = f"<{character2}>"
+        
+        # Check if both characters exist
+        if character1 not in self.characters:
+            raise ValueError(f"Character '{character1}' not found in graph")
+        if character2 not in self.characters:
+            raise ValueError(f"Character '{character2}' not found in graph")
+        
+        result_edges = []
+        result_edge_ids = set()
+        
+        # 1. Get all direct edges (where either character is source or target)
+        char1_edges = self.edges_of(character1)
+        char2_edges = self.edges_of(character2)
+        
+        # Direct edges: edges where both characters are involved
+        direct_edges = char1_edges & char2_edges
+        for edge_id in direct_edges:
+            if edge_id not in result_edge_ids:
+                edge = self.edges.get(edge_id)
+                if edge is not None:
+                    result_edges.append(edge)
+                    result_edge_ids.add(edge_id)
+        
+        # 2. Find indirect connections through objects
+        # Get all edges where character1 is involved
+        for edge_id in char1_edges:
+            edge1 = self.edges.get(edge_id)
+            if edge1 is None:
+                continue
+            
+            # Get the other node (not character1)
+            other_node = None
+            if edge1.source == character1:
+                other_node = edge1.target
+            elif edge1.target == character1:
+                other_node = edge1.source
+            
+            # Skip if other_node is None or is a character
+            if other_node is None:
+                continue
+            
+            # Check if other_node is an object (not a character)
+            is_char, _, _, _ = self._parse_node_string(other_node)
+            if is_char:
+                continue  # Skip if it's a character
+            
+            # Find all edges where this object connects to character2
+            object_edges = self.edges_of(other_node)
+            for edge_id2 in object_edges:
+                edge2 = self.edges.get(edge_id2)
+                if edge2 is None:
+                    continue
+                
+                # Check if edge2 connects the object to character2
+                connects_to_char2 = False
+                if (edge2.source == other_node and edge2.target == character2) or \
+                   (edge2.target == other_node and edge2.source == character2):
+                    connects_to_char2 = True
+                
+                if connects_to_char2:
+                    # Check clip_id difference < 4
+                    clip_diff = abs(edge1.clip_id - edge2.clip_id)
+                    if clip_diff < 4:
+                        # Add both edges to result
+                        if edge_id not in result_edge_ids:
+                            result_edges.append(edge1)
+                            result_edge_ids.add(edge_id)
+                        if edge_id2 not in result_edge_ids:
+                            result_edges.append(edge2)
+                            result_edge_ids.add(edge_id2)
+        
+        # 3. Find ownership connections: character1 interacts with object owned by character2
+        for edge_id in char1_edges:
+            edge = self.edges.get(edge_id)
+            if edge is None:
+                continue
+            
+            # Get the other node (not character1)
+            other_node = None
+            if edge.source == character1:
+                other_node = edge.target
+            elif edge.target == character1:
+                other_node = edge.source
+            
+            # Skip if other_node is None or is a character
+            if other_node is None:
+                continue
+            
+            # Check if other_node is an object (not a character)
+            is_char, _, _, _ = self._parse_node_string(other_node)
+            if is_char:
+                continue  # Skip if it's a character
+            
+            # Get the object node to check ownership
+            obj_key = self._string_to_object_key(other_node)
+            if obj_key is not None:
+                obj_node = self.objects.get(obj_key)
+                if obj_node is not None and obj_node.owner == character2:
+                    # Character1 interacts with an object owned by character2
+                    if edge_id not in result_edge_ids:
+                        result_edges.append(edge)
+                        result_edge_ids.add(edge_id)
+        
+        # 4. Find ownership connections: character2 interacts with object owned by character1
+        for edge_id in char2_edges:
+            edge = self.edges.get(edge_id)
+            if edge is None:
+                continue
+            
+            # Get the other node (not character2)
+            other_node = None
+            if edge.source == character2:
+                other_node = edge.target
+            elif edge.target == character2:
+                other_node = edge.source
+            
+            # Skip if other_node is None or is a character
+            if other_node is None:
+                continue
+            
+            # Check if other_node is an object (not a character)
+            is_char, _, _, _ = self._parse_node_string(other_node)
+            if is_char:
+                continue  # Skip if it's a character
+            
+            # Get the object node to check ownership
+            obj_key = self._string_to_object_key(other_node)
+            if obj_key is not None:
+                obj_node = self.objects.get(obj_key)
+                if obj_node is not None and obj_node.owner == character1:
+                    # Character2 interacts with an object owned by character1
+                    if edge_id not in result_edge_ids:
+                        result_edges.append(edge)
+                        result_edge_ids.add(edge_id)
+        
+        return result_edges
+
+
+    # --------------------------------------------------------
+    # Abstract Information API
+    # --------------------------------------------------------
     def character_attributes(self, character_name):
         """
         Extract character attributes by analyzing all edges connected to the character.
@@ -558,12 +645,13 @@ class HeteroGraph:
         2. Formats them as a readable string (one edge per line)
         3. Combines with prompt_character_summary
         4. Uses LLM to generate character attributes
+        5. Parses the LLM output and creates attribute edges in the graph
         
         Args:
             character_name: Character name (with or without angle brackets, e.g., "<Alice>" or "Alice")
         
         Returns:
-            str: LLM-generated character attributes (JSON array of words/phrases)
+            dict: Dictionary of attributes with confidence scores
         """
         # Ensure character name has angle brackets for lookup
         if not character_name.startswith("<") or not character_name.endswith(">"):
@@ -577,8 +665,8 @@ class HeteroGraph:
         edge_ids = self.edges_of(character_name)
         
         if not edge_ids:
-            # No edges found, return empty or minimal response
-            return "[]"
+            # No edges found, return empty dictionary
+            return {}
         
         # Format edges as strings (one per line)
         edge_lines = []
@@ -587,83 +675,160 @@ class HeteroGraph:
             if edge is None:
                 continue
             
-            # Format: source -> target: content [scene: scene_name, clip: clip_id]
-            edge_str = f"{edge.source} -> {edge.target}: {edge.content}"
+            # Format: source, content, target
+            target_str = edge.target if edge.target is not None else "null"
+            edge_str = f"{edge.source}, {edge.content}, {target_str}"
             if edge.scene:
-                edge_str += f" [scene: {edge.scene}, clip: {edge.clip_id}]"
-            else:
-                edge_str += f" [clip: {edge.clip_id}]"
+                edge_str += f", scene: {edge.scene}"
             
             edge_lines.append(edge_str)
         
         # Combine all edge descriptions into a single string
         edges_text = "\n".join(edge_lines)
         
-        # Create the full prompt
-        full_prompt = "Character: {character_name}\n\nCharacter behaviors (from graph edges):\n{edges_text}" + "\n" + prompt_character_summary
+        # Create the full prompt with proper string formatting
+        full_prompt = f"Character: {character_name}\n\nCharacter behaviors (from graph edges):\n{edges_text}\n{prompt_character_summary}"
         try:
-            attributes = generate_text_response(full_prompt)
+            attributes_response = generate_text_response(full_prompt)
         except Exception as e:
             print(f"LLM call failed, retrying... Error: {e}")
-            attributes = generate_text_response(full_prompt)
-        return attributes
+            attributes_response = generate_text_response(full_prompt)
+        
+        # Parse the LLM response
+        attributes_response = strip_code_fences(attributes_response)
+        try:
+            attributes_dict = json.loads(attributes_response)
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse LLM response as JSON: {e}")
+            print(f"Response was: {attributes_response}")
+            return {}
+        
+        # Create edges for each attribute
+        for attribute_name, confidence in attributes_dict.items():
+            # Only create edge if confidence >= 50 (as per prompt instructions)
+            if not isinstance(confidence, (int, float)) or confidence < 50:
+                continue
+                
+            edge = Edge(
+                clip_id=0,
+                source=character_name,
+                target=None,
+                content=attribute_name,
+                scene=None,
+                confidence=confidence
+            )
+            try:
+                self.add_edge(edge)
+            except Exception as e:
+                pass
+        
+        return attributes_dict
 
-    # --------------------------------------------------------
-    # Update / Mutation API
-    # --------------------------------------------------------
-    def delete_edge(self, edge_id):
+    def character_relationships(self, character1, character2):
         """
-        Delete an edge from the graph.
+        Extract character relationships by analyzing all edges between two characters.
+        
+        This function:
+        1. Gets all edges directly or indirectly connected between the two characters
+        2. Formats them as a readable string (one edge per line)
+        3. Combines with prompt_character_relationships
+        4. Uses LLM to generate relationship descriptions
+        5. Parses the LLM output and creates relationship edges in the graph
         
         Args:
-            edge_id: ID of the edge to delete
+            character1: First character name (with or without angle brackets, e.g., "<Alice>" or "Alice")
+            character2: Second character name (with or without angle brackets, e.g., "<Bob>" or "Bob")
+        
+        Returns:
+            list: List of relationship tuples [character1, relationship, character2, confidence]
         """
-        if edge_id not in self.edges:
-            return
-        e = self.edges[edge_id]
-
-        # Remove from both adjacency lists
-        if edge_id in self.adjacency_list_out[e.source]:
-            self.adjacency_list_out[e.source].remove(edge_id)
-        if edge_id in self.adjacency_list_in[e.target]:
-            self.adjacency_list_in[e.target].remove(edge_id)
-
-        del self.edges[edge_id]
-
-    def delete_node(self, node_id):
-        for eid in list(self.edges_of(node_id)):
-            self.delete_edge(eid)
-        if node_id in self.nodes:
-            del self.nodes[node_id]
-
-    def merge_nodes(self, node_ids, new_node):
-        """Merge multiple nodes into a new single node."""
-        self.add_node(new_node)
-
-        for old in node_ids:
-            if old not in self.nodes:
+        # Normalize character names (add angle brackets if needed)
+        if not character1.startswith("<") or not character1.endswith(">"):
+            character1 = f"<{character1}>"
+        if not character2.startswith("<") or not character2.endswith(">"):
+            character2 = f"<{character2}>"
+        
+        # Check if both characters exist
+        if character1 not in self.characters:
+            raise ValueError(f"Character '{character1}' not found in graph")
+        if character2 not in self.characters:
+            raise ValueError(f"Character '{character2}' not found in graph")
+        
+        # Get all connected edges between the two characters
+        connected_edges = self.get_connected_edges(character1, character2)
+        
+        if not connected_edges or len(connected_edges) < 3:
+            return []
+        
+        # Format edges as strings (one per line)
+        edge_lines = []
+        for edge in sorted(connected_edges, key=lambda e: (e.clip_id, e.id)):  # Sort by clip_id for chronological order
+            # Format: source, content, target
+            target_str = edge.target if edge.target is not None else "null"
+            edge_str = f"{edge.source}, {edge.content}, {target_str}"
+            if edge.scene:
+                edge_str += f", scene: {edge.scene}"
+            
+            edge_lines.append(edge_str)
+        
+        # Combine all edge descriptions into a single string
+        edges_text = "\n".join(edge_lines)
+        
+        # Create the full prompt with proper string formatting
+        full_prompt = f"Character 1: {character1}\nCharacter 2: {character2}\n\nCharacter interactions (from graph edges):\n{edges_text}\n{prompt_character_relationships}"
+        try:
+            relationships_response = generate_text_response(full_prompt)
+        except Exception as e:
+            print(f"LLM call failed, retrying... Error: {e}")
+            relationships_response = generate_text_response(full_prompt)
+        
+        # Parse the LLM response
+        relationships_response = strip_code_fences(relationships_response)
+        try:
+            relationships_list = json.loads(relationships_response)
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse LLM response as JSON: {e}")
+            print(f"Response was: {relationships_response}")
+            return []
+        
+        # Validate and create edges for each relationship
+        relationships_created = []
+        for rel in relationships_list:
+            # Expected format: [character1, relationship, character2, confidence]
+            if not isinstance(rel, list) or len(rel) < 4:
                 continue
-
-            for eid in list(self.edges_of(old)):
-                e = self.edges[eid]
-
-                new_src = new_node.id if e.source == old else e.source
-                new_tgt = new_node.id if e.target == old else e.target
-
-                # delete old edge
-                self.delete_edge(eid)
-
-                # add new redirected edge
-                self.add_edge(
-                    Edge(
-                        source=new_src,
-                        target=new_tgt,
-                        edge_type=e.type,
-                        directed=e.directed,
-                        data=e.data
-                    )
+            
+            rel_char1, relationship, rel_char2, confidence = rel[0], rel[1], rel[2], rel[3]
+            
+            # Only create edge if confidence >= 50 (as per prompt instructions)
+            if not isinstance(confidence, (int, float)) or confidence < 50:
+                continue
+            
+            # Normalize character names in the relationship
+            if not rel_char1.startswith("<") or not rel_char1.endswith(">"):
+                rel_char1 = f"<{rel_char1}>"
+            if not rel_char2.startswith("<") or not rel_char2.endswith(">"):
+                rel_char2 = f"<{rel_char2}>"
+            
+            # Verify the characters match the input (order might be swapped)
+            if (rel_char1 == character1 and rel_char2 == character2) or \
+               (rel_char1 == character2 and rel_char2 == character1):
+                # Create edge: source=character1, content=relationship, target=character2
+                # Use the order from the relationship (LLM's choice)
+                edge = Edge(
+                    clip_id=0,
+                    source=rel_char1,
+                    target=rel_char2,
+                    content=relationship,
+                    scene=None,
+                    confidence=confidence
                 )
+                try:
+                    self.add_edge(edge)
+                    relationships_created.append(rel)
+                except Exception as e:
+                    print(f"Failed to add relationship edge: {e}")
+                    pass
+        
+        return relationships_created
 
-            del self.nodes[old]
-
-        return new_node.id

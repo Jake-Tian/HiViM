@@ -20,10 +20,11 @@ Your tasks:
 3. **Character Appearance**
    - Describe each character's appearance: facial features, clothing, body shape, hairstyle, or other distinctive characteristics.
    - Each characteristic should be concise, separated by commas.
-   - **New characters**: Describe based on what you observe.
+   - **New characters**: Before creating a new unknown character (<character_X>), FIRST check if any previously seen unknown character from earlier clips matches the appearance. If a match is found, add an equivalence line at the **start of characters_behavior**. Then remove its information from character_appearance. Only create a new unknown character if no previous unknown character matches.
    - **Existing characters** (if previous appearance info provided): Update if changes observed, enhance if new details visible, otherwise keep unchanged.
    - If the character leaves the scene, keep their appearance information in the dictionary.
    - If two characters in the scene look similar, extract the most distinctive features to describe them.
+   - **Minimize unknown characters**: Try to match new characters with previously seen unknown characters based on appearance similarity. Only create new unknown characters when absolutely necessary.
    - Output format: Python dictionary {<character>: appearance information}.
 
 4. **Scene**: Use one word or phrase to describe the scene in the current video (eg. "bedroom", "gym", "office", etc.).
@@ -31,9 +32,13 @@ Your tasks:
 
 Special Rules:
 - Use angle brackets to represent the characters eg. <Alice>, <Bob>, <robot>, <character_1>, etc.
-- If you don't know the character's name, use <character_1>, <character_2>, etc.
+- **Character identification priority**: 
+  1. Use known character names if mentioned in conversation or clearly identifiable.
+  2. If character is unknown, FIRST check if any previous unknown character (<character_1>, <character_2>, etc. from earlier clips) matches the appearance - reuse that character name.
+  3. Only create a NEW unknown character (<character_X>) if no previous unknown character matches.
+  4. Minimize the total number of unknown characters across all clips.
 - If an unknown character is later identified, add an equivalence line at the **start of characters_behavior**. Then remove its information from character_appearance: 
-  Example: "Equivalance: <character_1>, <Alice>"
+  Example: "Equivalence: <character_1>, <Alice>"
 - Include the robot (<robot>) if present:
   - It wears black gloves and has no visible face (it holds the camera).
   - Describe its behavior and conversation.
@@ -70,107 +75,116 @@ Checklist:
 
 
 prompt_extract_triples = """
-You are given a list of action sentences describing character behavior.
-Convert them into triples of the form:
+You are given a list of action sentences describing character behavior.  
+Convert each sentence into triples of the form:
 
-[subject, predicate, object]
+[target, content, source]
 
 Return ONLY a valid JSON array (list of lists). No explanation.
 
-### CORE RULES
+### OUTPUT FORMAT
+- Strict JSON only: double quotes, no trailing commas.
+- Each triple: [target, content, source]
+- Preserve input order.
 
-1. SUBJECTS
-- Subjects may be characters (with angle brackets) or objects/entities.
+### RULES
+1. TARGET & SOURCE (Subject and Object)
+- May be characters (with angle brackets) or objects/entities.
 - Copy subjects verbatim (e.g., "<robot>", "coffee").
+- Use `null` if no source exists.
 
-2. OBJECT IDENTIFICATION
-- Objects are nouns representing entities (physical things, abstract concepts, or named objects).
-- Format: simple noun (e.g., "table", "phone", "book") or noun#attribute (see rule 3 for attributes).
-- Plurals → singularize (e.g., "books" → "book").
-- Named objects → keep verbatim (e.g., "bottle of Nescafe").
-- **Position/direction**: Do NOT use as object. Merge into predicate.
-  Example: "<Lily> turns left" → ["<Lily>", "turns left", null], NOT ["<Lily>", "turns", "left"].
-- **Missing objects**: Use `null` if no object can be extracted.
-  Example: "<Frank> dances" → ["<Frank>", "dances", null].
-- **Multiple objects**: Split compound objects into separate triples.
+2. CONTENT (Predicate)
+- Must be the verb/action or relationship.
+- Use **base form or present participle** ("walks", "puts", "looking").
+- Include auxiliary verbs/prepositions when relevant ("picks up", "turns left", "looks at").
+- Merge direction/position into the verb:
+  - "<Lily> turns left" → ["<Lily>", "turns left", null]
+  - "<robot> moves forward" → ["<robot>", "moves forward", null]
+- Merge body parts into the verb:
+  - "<Alice> hits <Bob>'s head" → ["<Alice>", "hits head", "<Bob>"]
+  - "<Emma> touches <David>'s shoulder" → ["<Emma>", "touches shoulder", "<David>"]
+- Communication actions: encode directly
+  - ["<Alice>", "asks", "<Bob>"]
+  - ["<Emma>", "greets", "<David>"]
+  - Do NOT create abstract objects ("question", "message").
+- State changes: use verbs like "is on", "becomes", "changes to".
+- Prefer completed actions ("puts") over partial ones ("is putting").
 
-3. ATTRIBUTE (#) CONSTRAINTS
-- Attributes MUST be identity-defining characteristics.
-- ALLOWED: color, material, shape, size, brand/type.
-- FORBIDDEN: locations, positions, or conditions.
-- Temporary states/locations MUST be expressed as separate triples.
+3. OBJECT IDENTIFICATION
+- Objects = nouns (physical things, abstract concepts, named items).
+- Format: noun or noun#attribute or noun@<character>.
+- Singularize plurals ("books" → "book").
+- Keep named objects verbatim ("bottle of Nescafe").
+- Split compound objects into separate triples.
+- Use `null` if no object is extractable.
+  - Example: "<Harry> walks" → ["<Harry>", "walk", null]
 
-4. OWNERSHIP (@)
-- Personal items (objects that belong to a specific character) → noun@<character>.
-- Use ownership notation ONLY for items that are clearly personal possessions or belong to a specific character.
-- Examples: "phone@<Alice>", "bag@<Bob>", "jacket@<Lily>"
-- When to use ownership:
-  * Personal devices: phone, wallet, keys, watch, glasses
-  * Personal clothing/accessories: jacket, bag, hat (when clearly belonging to someone)
-  * Personal items mentioned with possessive pronouns ("her phone", "his bag")
-- When NOT to use ownership:
-  * Shared/public objects: table, chair, mug, coffee bottle, door
-  * Objects being passed between characters (use without ownership)
-  * Objects in the environment
+4. ATTRIBUTES (#)
+- Attributes must be identity-defining: color, material, shape, size, brand/type.
+- Example: "mug#white", "bag#leather".
+- Do NOT encode location/position as attributes.
 
-5. BODY PARTS
-- Merge body parts into the predicate.
-  Example: "<Alice> hits <Bob>'s head" → ["<Alice>", "hits head", "<Bob>"].
-  Example: "<Emma> touches <David>'s shoulder" → ["<Emma>", "touches shoulder", "<David>"].
+5. OWNERSHIP (@)
+- Use `noun@<character>` for personal possessions:
+  - Devices: phone, wallet, keys, watch, glasses
+  - Clothing/accessories: jacket, bag, hat
+- Triggered by possessive pronouns ("her phone", "his bag").
+- Do NOT use for shared/public objects (table, chair, mug, door, basketball).
 
-6. COMMUNICATION ACTIONS
-- Do NOT create abstract conversation objects ("response", "message", "question").
-- Use the character directly as the object, or encode the concept in the predicate.
-  Example: ["<Alice>", "responds to", "<Bob>"] or ["<Alice>", "responds to question", "<Bob>"].
-  Example: ["<Sarah>", "asks", "<Tom>"] or ["<Emma>", "greets", "<David>"].
-
-7. PRONOUNS
+6. PRONOUNS
 - NEVER use pronouns ("her", "his", "their").
-- Replace pronouns with the actual character or object name.
+- Replace with explicit character/object names.
 
-8. MULTIPLE RELATIONS
-- If a sentence expresses multiple relations, split into multiple triples.
+7. MULTIPLE RELATIONS
+- Split sentences with multiple subjects, contents (verbs), or objects into separate triples.
+- **Multiple subjects**: Each subject gets its own triple with the same content and object.
+  Example: "<Alice> and <Bob> exit" →
+    ["<Alice>", "exit", null],
+    ["<Bob>", "exit", null]
+- **Multiple contents (verbs)**: Each verb gets its own triple with the same subject and object.
+  Example: "<Alice> walks and talks" →
+    ["<Alice>", "walks", null],
+    ["<Alice>", "talks", null]
+- **Multiple objects**: Each object gets its own triple with the same subject and content.
+  Example: "<Alice> picks up the book and the pen" →
+    ["<Alice>", "picks up", "book"],
+    ["<Alice>", "picks up", "pen"]
 
-9. DEDUPLICATION
+8. DEDUPLICATION
 - Keep only distinct, meaningful actions.
-- Prefer completed actions over partial or preparatory ones.
 - Avoid redundant states implied by stronger actions.
 
-10. STATE REPRESENTATION
-- State triples are allowed with the object as subject.
-  Example: "<robot> puts coffee on table" →
-  ["<robot>", "puts", "coffee"], ["coffee", "is on", "table"].
+9. STATE REPRESENTATION
+- Allowed with object as subject:
+  - "<robot> puts coffee on table" →
+    ["<robot>", "puts", "coffee"],
+    ["coffee", "is on", "table"]
 
-11. ORDER & FALLBACK
-- Preserve the original order of actions.
-- If unsure, default to minimally transformed [subject, verb, object].
-
-12. OUTPUT FORMAT
-- Strict JSON only: double quotes, no trailing commas.
+10. FALLBACK
+- If unsure, default to minimally transformed [target, content, source].
 
 ### EXAMPLE
 
 Input:
 [
-  "<Lily> looks at her phone.",
-  "<robot> offers the white mug with the drink to <Lily>.",
-  "<Emma> picks up <David>'s bag from the table.",
-  "<Sarah> gives the book to <Tom>.",
-  "<Lily> turns left."
+  "<Michael> pats <Susan>'s shoulder and smiles.",
+  "<robot> places the red cup on the counter.",
+  "<Tom> asks <Mary> about the meeting.",
+  "<Lisa> dances and sings.",
+  "<John> takes his wallet and keys from the drawer."
 ]
-
 Output:
 [
-  ["<Lily>", "looks at", "phone@<Lily>"],
-  ["<robot>", "offers", "mug#white"],
-  ["<Lily>", "receives", "mug#white"],
-  ["<Emma>", "picks up", "bag@<David>"],
-  ["<Sarah>", "gives", "book"],
-  ["<Tom>", "receives", "book"],
-  ["<Lily>", "turns left", null]
+  ["<Michael>", "pats shoulder", "<Susan>"],
+  ["<Michael>", "smiles", null],
+  ["<robot>", "places", "cup#red"],
+  ["cup#red", "is on", "counter"],
+  ["<Tom>", "asks", "<Mary>"],
+  ["<Lisa>", "dances", null],
+  ["<Lisa>", "sings", null],
+  ["<John>", "takes", "wallet@<John>"],
+  ["<John>", "takes", "keys@<John>"]
 ]
-
-Note: "phone@<Lily>" and "bag@<David>" use ownership because they are personal items. "mug#white" and "book" have no ownership because they are shared/public objects being passed between characters. Direction "left" is merged into the predicate "turns left" rather than being a separate object.
 
 Now convert the following lines into triples:
 """
@@ -198,16 +212,64 @@ The input consists of multiple clips, each with:
 Now summarize the following clips:
 """
 
+
 prompt_character_summary = """
 You are given a character's name and a list of their behaviors in chronological order.
 
 Your task is to summarize the character's attributes: 
-- Personality (e.g., confident, nervous)
-- Role/profession (e.g., host, newcomer) 
+- Personality (eg. confident, nervous)
+- Role/profession (eg. host, newcomer) 
 - Interests or background (when inferable) 
-- Distinctive behaviors or traits (e.g., speaks formally, fidgets). 
+- Distinctive behaviors or traits (eg. speaks formally, fidgets). 
 Avoid restating visual facts—focus on identity construction.
 
-Output a JSON array of words or phrases that describe the character's attributes. 
-Example: ["student", "enthusiastic", "likes to read"]
+For each attribute, you should also provide a confidence score between 0 and 100. 
+If the confidence score is less than 50, you should not include the attribute in the output.
+
+Output a JSON dictionary (key: attribute, value: confidence score). 
+Example: {"student": 90, "enthusiastic": 80, "likes to read": 70, "professional": 50}
 """
+
+
+prompt_character_relationships = """
+You are given a list of character interactions in chronological order.
+Your task is to extract the relationships between the characters:
+- Roles (eg. friends, colleagues, host-guest, teacher-student, parent-child, etc.)
+- Attitudes/Emotions (eg. respect, dislike, friendly, etc.)
+- Power dynamics (eg. who leads, equal, etc.)
+- Evidence of cooperation
+- Exclusion, conflict, competition, etc. 
+
+Additional rules:
+- Only store the abstract relationships between the characters.
+- Do NOT include any actual actions or summary of actions in the output (eg. <Alice> speaks with <Bob>, <Alice> plays games with <Bob>, etc.). 
+- Do not generate repetitive or symmetric information. 
+
+For each relationship, you should also provide a confidence score between 0 and 100.
+If the confidence score is less than 50, you should not include the relationship in the output.
+It is acceptable to only generate a few relationships if you don't have enough information.
+
+Output a JSON array (list of lists). 
+Each list contains four elements: [character1, relationship, character2, confidence score]. 
+Example: [["<Alice>", "is friend with", "<Bob>", 90], ["<Alice>", "is teacher of", "<Charlie>", 80], ["<Charlie>", "respects", "<Alice>", 70]]
+"""
+
+
+prompt_conversation_summary = """
+You are given a conversation between several characters.
+
+Your tasks: 
+
+1. **Summary**
+- Summarize the conversation in a few sentences.
+- Output format: Python string.
+
+2. **Character's Attributes**
+- Describe each character's attributes: personality, role, interests, background, etc.
+- Output format: Python dictionary {<character>: attributes}.
+
+3. **Character Relationships**
+- Describe the relationships between the characters: roles, attitudes, power dynamics, evidence of cooperation, exclusion, conflict, competition, etc.
+- Output format: Python dictionary {<character>: relationships}.
+"""
+
