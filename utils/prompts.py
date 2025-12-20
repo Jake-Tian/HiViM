@@ -15,6 +15,7 @@ Your tasks:
 
 2. **Conversation**
    - Record the dialogue based on subtitles.
+   - Always use characters' real name existed in the subtitle. 
    - Output format: List of two-element lists [character, content].
 
 3. **Character Appearance**
@@ -37,12 +38,13 @@ Special Rules:
   2. If character is unknown, FIRST check if any previous unknown character (<character_1>, <character_2>, etc. from earlier clips) matches the appearance - reuse that character name.
   3. Only create a NEW unknown character (<character_X>) if no previous unknown character matches.
   4. Minimize the total number of unknown characters across all clips.
-- If an unknown character is later identified, add an equivalence line at the **start of characters_behavior**. Then remove its information from character_appearance: 
+- If an unknown character is later identified, add an equivalence line at the **start of characters_behavior**. Then remove its information from character_appearance and replace it with the real name: 
   Example: "Equivalence: <character_1>, <Alice>"
 - Include the robot (<robot>) if present:
   - It wears black gloves and has no visible face (it holds the camera).
   - Describe its behavior and conversation.
   - Do NOT include robot in character appearance information, but include it in characters_behavior and conversation.
+- All characters' name mentioned in behaviors and conversation must exists in character appearance. 
 - Maintain strict chronological order.
 - Avoid repetition in both behavior and conversation.
 - If no behavior or conversation is observed, return an empty list for characters_behavior and conversation.
@@ -68,7 +70,7 @@ Return a Python dictionary with exactly four keys:
 }
 
 Checklist: 
-- [ ] Output is a Python dictionary.
+- [ ] Output is a JSON object.
 - [ ] Dictionary has exactly 4 keys: "characters_behavior", "conversation", "character_appearance", "scene".
 - [ ] No duplicate or repetitive entries in behavior or conversation.
 """

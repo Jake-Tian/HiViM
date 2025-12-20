@@ -1,0 +1,24 @@
+
+Processing bedroom_12...
+--------------------------------
+Processing folder:  data/frames/bedroom_12/1
+Inserted 9 triples into graph for clip 1
+--------------------------------
+Processing folder:  data/frames/bedroom_12/2
+Inserted 15 triples into graph for clip 2
+--------------------------------
+Processing folder:  data/frames/bedroom_12/3
+Inserted 12 triples into graph for clip 3
+--------------------------------
+Processing folder:  data/frames/bedroom_12/4
+Inserted 17 triples into graph for clip 4
+Generating character attributes...
+Number of edges:  52
+Character attributes generated.
+Number of edges:  62
+Character relationships generated.
+Number of edges:  66
+
+✓ Saved episodic memory for 4 clips to data/episodic_memory/bedroom_12.json
+✓ bedroom_12 complete. Graph has 4 characters and 66 edges.
+Time taken: 252.22317242622375 seconds

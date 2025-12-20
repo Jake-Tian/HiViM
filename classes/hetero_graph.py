@@ -370,7 +370,11 @@ class HeteroGraph:
             
             # Create and add edge
             edge = Edge(clip_id=clip_id, source=source_node_name, target=target_node_name, content=edge_content, scene=scene)
-            self.add_edge(edge)
+            try:
+                self.add_edge(edge)
+            except ValueError as e:
+                print(f"Warning: {e}, skipping triple: {triple}")
+                continue
     
 
     # --------------------------------------------------------

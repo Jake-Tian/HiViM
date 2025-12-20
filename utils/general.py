@@ -1,7 +1,25 @@
 """
 General utility helpers.
 """
+import sys
 from pathlib import Path
+
+
+class Tee:
+    """Write to both file and stdout."""
+    def __init__(self, file):
+        self.file = file
+        self.stdout = sys.stdout
+        
+    def write(self, text):
+        self.file.write(text)
+        self.file.flush()
+        self.stdout.write(text)
+        self.stdout.flush()
+        
+    def flush(self):
+        self.file.flush()
+        self.stdout.flush()
 
 def strip_code_fences(text: str) -> str:
     """

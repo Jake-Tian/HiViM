@@ -1,12 +1,14 @@
 import glob
 import json
 import pickle
+import sys
+import time
 from pathlib import Path
 from classes.hetero_graph import HeteroGraph
 from utils.llm import generate_text_response
 from utils.mllm_pictures import generate_messages, get_response
 from utils.prompts import prompt_generate_episodic_memory, prompt_extract_triples
-from utils.general import strip_code_fences, load_video_list
+from utils.general import strip_code_fences, load_video_list, Tee
 
 
 def process_full_video(frames_dir, output_graph_path=None, output_episodic_memory_path=None):
@@ -31,10 +33,14 @@ def process_full_video(frames_dir, output_graph_path=None, output_episodic_memor
         output_episodic_memory_path = f"data/episodic_memory/{video_name}.json"
     
     # Get sorted image folders
-    image_folders = sorted(
-        [str(folder) for folder in frames_dir.iterdir() if folder.is_dir()],
-        key=lambda x: int(Path(x).name)
-    )
+    # image_folders = sorted(
+    #     [str(folder) for folder in frames_dir.iterdir() if folder.is_dir()],
+    #     key=lambda x: int(Path(x).name)
+    # )
+    image_folders = ["data/frames/bedroom_12/1", 
+                    "data/frames/bedroom_12/2", 
+                    "data/frames/bedroom_12/3", 
+                    "data/frames/bedroom_12/4"]
     
     character_appearance = "{}"
     previous_conversation = False
@@ -132,10 +138,17 @@ def process_full_video(frames_dir, output_graph_path=None, output_episodic_memor
     print("Number of edges: ", len(graph.edges))
     degrees = graph.get_node_degrees()
     # Select all characters whose degree is greater than 10
-    characters = [character for character in graph.characters if degrees[character] > 10]
+    characters = [character for character in graph.characters if degrees.get(character, 0) > 10]
 
     for character in characters:
-        graph.character_attributes(character)
+        try: 
+            graph.character_attributes(character)
+        except Exception as e:
+            print(f"✗ Error generating character attributes for {character}: {e}")
+            import traceback
+            traceback.print_exc()
+            print("Continuing to next character...")
+            continue
     print("Character attributes generated.")
     print("Number of edges: ", len(graph.edges))
 
@@ -143,7 +156,14 @@ def process_full_video(frames_dir, output_graph_path=None, output_episodic_memor
     # pair up characters and generate relationships
     for i in range(len(characters)-1):
         for j in range(i+1, len(characters)):
-            graph.character_relationships(characters[i], characters[j])
+            try:
+                graph.character_relationships(characters[i], characters[j])
+            except Exception as e:
+                print(f"✗ Error generating character relationships for {characters[i]} and {characters[j]}: {e}")
+                import traceback
+                traceback.print_exc()
+                print("Continuing to next character pair...")
+                continue
     print("Character relationships generated.")
     print("Number of edges: ", len(graph.edges))
 
@@ -165,7 +185,10 @@ def process_full_video(frames_dir, output_graph_path=None, output_episodic_memor
 
 def main():
     """Main function to process video frames."""
-    import sys
+    # Redirect stdout to both terminal and log.txt
+    original_stdout = sys.stdout
+    log_file = open("log.txt", "w", encoding="utf-8")
+    sys.stdout = Tee(log_file)
     
     video_names = load_video_list()
     
@@ -176,10 +199,11 @@ def main():
     else:
         selected = video_names
     
-    # selected = ["gym_01"] # Comment this out to process all videos
+    selected = ["bedroom_12"] # Comment this out to process all videos
 
     for video_name in selected:
         try:
+            start_time = time.time()
             frames_dir = Path(f"data/frames/{video_name}")
             if not frames_dir.exists():
                 print(f"Skipping {video_name}: frames not found")
@@ -187,13 +211,17 @@ def main():
             print(f"\nProcessing {video_name}...")
             graph, episodic_memory = process_full_video(frames_dir)
             print(f"✓ {video_name} complete. Graph has {len(graph.characters)} characters and {len(graph.edges)} edges.")
+            end_time = time.time()
+            print(f"Time taken: {end_time - start_time} seconds")
         except Exception as e:
             print(f"✗ Error processing video {video_name}: {e}")
             import traceback
             traceback.print_exc()
             print("Continuing to next video...")
             continue
-
+    
+    sys.stdout = original_stdout
+    log_file.close()
 
 if __name__ == "__main__":
     main()
