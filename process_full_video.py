@@ -33,14 +33,12 @@ def process_full_video(frames_dir, output_graph_path=None, output_episodic_memor
         output_episodic_memory_path = f"data/episodic_memory/{video_name}.json"
     
     # Get sorted image folders
-    # image_folders = sorted(
-    #     [str(folder) for folder in frames_dir.iterdir() if folder.is_dir()],
-    #     key=lambda x: int(Path(x).name)
-    # )
-    image_folders = ["data/frames/gym_01/1", 
-                    "data/frames/gym_01/2", 
-                    "data/frames/gym_01/3", 
-                    "data/frames/gym_01/4"]
+    image_folders = sorted(
+        [str(folder) for folder in frames_dir.iterdir() if folder.is_dir()],
+        key=lambda x: int(Path(x).name)
+    )
+
+    image_folders = image_folders[:2]
     
     character_appearance = "{}"
     previous_conversation = False
