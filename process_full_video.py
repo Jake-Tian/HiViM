@@ -33,14 +33,14 @@ def process_full_video(frames_dir, output_graph_path=None, output_episodic_memor
         output_episodic_memory_path = f"data/episodic_memory/{video_name}.json"
     
     # Get sorted image folders
-    image_folders = sorted(
-        [str(folder) for folder in frames_dir.iterdir() if folder.is_dir()],
-        key=lambda x: int(Path(x).name)
-    )
-    # image_folders = ["data/frames/bedroom_12/1", 
-    #                 "data/frames/bedroom_12/2", 
-    #                 "data/frames/bedroom_12/3", 
-    #                 "data/frames/bedroom_12/4"]
+    # image_folders = sorted(
+    #     [str(folder) for folder in frames_dir.iterdir() if folder.is_dir()],
+    #     key=lambda x: int(Path(x).name)
+    # )
+    image_folders = ["data/frames/gym_01/1", 
+                    "data/frames/gym_01/2", 
+                    "data/frames/gym_01/3", 
+                    "data/frames/gym_01/4"]
     
     character_appearance = "{}"
     previous_conversation = False
@@ -51,7 +51,7 @@ def process_full_video(frames_dir, output_graph_path=None, output_episodic_memor
         try:
             print("--------------------------------")
             print("Processing folder: ", folder)
-            clip_id = int(folder.split("/")[-1])
+            clip_id = int(Path(folder).name)
             response_dict = dict()
             # Collect images in the current folder
             current_images = sorted(
@@ -74,20 +74,44 @@ def process_full_video(frames_dir, output_graph_path=None, output_episodic_memor
             response_dict = json.loads(response)
 
             # 1. Process the character's behavior
-            behaviors = response_dict["characters_behavior"]
+            behaviors = response_dict.get("characters_behavior", [])
+            if not isinstance(behaviors, list):
+                behaviors = []
+            
             if behaviors and len(behaviors) > 0 and behaviors[0].startswith("Equivalence:"):
-                equivalence = behaviors[0].split(":")[1].split(",")
-                behaviors = behaviors[1:]
-                graph.rename_character(equivalence[0].strip(), equivalence[1].strip())
+                equivalence_parts = behaviors[0].split(":")[1].split(",")
+                if len(equivalence_parts) >= 2:
+                    behaviors = behaviors[1:]
+                    graph.rename_character(equivalence_parts[0].strip(), equivalence_parts[1].strip())
+                else:
+                    print(f"Warning: Malformed equivalence line '{behaviors[0]}', skipping rename")
 
             # 2. Process the character appearance
-            character_appearance = response_dict["character_appearance"]
-            for character in character_appearance:
-                if character not in graph.characters:
-                    graph.add_character(character)
+            character_appearance = response_dict.get("character_appearance", {})
+            if isinstance(character_appearance, dict):
+                for character in character_appearance:
+                    if character not in graph.characters:
+                        graph.add_character(character)
+            else:
+                print(f"Warning: character_appearance is not a dictionary, got {type(character_appearance)}")
+                character_appearance = {}
 
             # 3. Process the conversation
-            conversation = response_dict["conversation"]
+            conversation = response_dict.get("conversation", [])
+            if not isinstance(conversation, list):
+                conversation = []
+            
+            # Check if previous conversation ended (no conversation in current clip)
+            # Extract summary before creating/updating conversation
+            if previous_conversation and len(conversation) == 0 and graph.current_conversation_id is not None:
+                try:
+                    print(f"Extracting summary for completed conversation {graph.current_conversation_id}...")
+                    result = graph.extract_conversation_summary(graph.current_conversation_id)
+                    print(f"✓ Conversation summary extracted. Attributes: {len(result['character_attributes'])}, Relationships: {len(result['characters_relationships'])}")
+                except Exception as e:
+                    print(f"✗ Error extracting conversation summary: {e}")
+                    import traceback
+                    traceback.print_exc()
 
             if len(conversation) > 0:
                 graph.update_conversation(clip_id, conversation, previous_conversation=previous_conversation)
@@ -95,12 +119,16 @@ def process_full_video(frames_dir, output_graph_path=None, output_episodic_memor
             else:
                 previous_conversation = False  # No conversation in this clip, reset for next iteration
 
-            scene = response_dict["scene"]
+            scene = response_dict.get("scene")
 
             #--------------------------------
             # Semantic Memory
             #--------------------------------
-            behavior_prompt = prompt_extract_triples + "\n" + "\n".join(behaviors)
+            # Ensure behaviors is a list of strings for join operation
+            if behaviors:
+                behavior_prompt = prompt_extract_triples + "\n" + "\n".join(str(b) for b in behaviors)
+            else:
+                behavior_prompt = prompt_extract_triples
             try:
                 triples_response = generate_text_response(behavior_prompt)
             except Exception as e:
@@ -129,6 +157,17 @@ def process_full_video(frames_dir, output_graph_path=None, output_episodic_memor
             traceback.print_exc()
             print("Continuing to next folder...")
             continue
+
+    # Extract summary for any remaining active conversation at the end
+    if previous_conversation and graph.current_conversation_id is not None:
+        try:
+            print(f"Extracting summary for final conversation {graph.current_conversation_id}...")
+            result = graph.extract_conversation_summary(graph.current_conversation_id)
+            print(f"✓ Final conversation summary extracted. Attributes: {len(result['character_attributes'])}, Relationships: {len(result['characters_relationships'])}")
+        except Exception as e:
+            print(f"✗ Error extracting final conversation summary: {e}")
+            import traceback
+            traceback.print_exc()
 
     # Insert edge embeddings
     graph.edge_embedding_insertion()
@@ -202,7 +241,7 @@ def main():
     else:
         selected = video_names
     
-    # selected = ["bedroom_12"] # Comment this out to process all videos
+    selected = ["gym_01"] # Comment this out to process all videos
 
     for video_name in selected:
         try:

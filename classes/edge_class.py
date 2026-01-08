@@ -17,7 +17,7 @@ class Edge:
         self.content = content
         self.scene = scene
         self.confidence = confidence
-        self.embedding = get_embedding(content)
+        self.embedding = embedding
 
     def __repr__(self):
         return f"Edge({self.source} -> {self.target}, content={self.content})"

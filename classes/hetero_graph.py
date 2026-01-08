@@ -4,7 +4,7 @@ from .node_class import CharacterNode, ObjectNode
 from .edge_class import Edge
 from .conversation import Conversation
 from collections import defaultdict
-from utils.prompts import prompt_character_summary, prompt_character_relationships
+from utils.prompts import prompt_character_summary, prompt_character_relationships, prompt_conversation_summary
 from utils.llm import generate_text_response, get_embedding, get_multiple_embeddings
 from utils.general import strip_code_fences
 
@@ -387,7 +387,7 @@ class HeteroGraph:
         
         Args:
             clip_id: ID of the current clip
-            messages: List of [speaker, text] pairs for the conversation
+            messages: List of [speaker, content] pairs for the conversation (2 elements)
             previous_conversation: If True, update the current conversation; if False, create a new one
         
         Returns:
@@ -400,7 +400,7 @@ class HeteroGraph:
             # Update existing conversation
             conversation = self.conversations.get(self.current_conversation_id)
             if conversation:
-                conversation.add_messages(messages)
+                conversation.add_messages(messages, clip_id)
                 conversation.add_clip(clip_id)
                 return conversation.id
             else:
@@ -408,8 +408,28 @@ class HeteroGraph:
                 previous_conversation = False
         
         if not previous_conversation:
-            # Create new conversation
-            conversation = Conversation(clip_id=clip_id, messages=messages)
+            # Create new conversation - convert messages to 4-element format first
+            from utils.llm import get_embedding
+            formatted_messages = []
+            for msg in messages:
+                if isinstance(msg, list) and len(msg) >= 2:
+                    speaker = msg[0]
+                    content = msg[1]
+                    # Generate embedding for the message using text-embedding-3-small
+                    # Remove angle brackets from speaker name for embedding: "<Alice>" -> "Alice"
+                    speaker_name = speaker
+                    if speaker_name.startswith("<") and speaker_name.endswith(">"):
+                        speaker_name = speaker_name[1:-1]
+                    formatted_msg = f"{speaker_name}: {content}"
+                    try:
+                        embedding = get_embedding(formatted_msg)
+                    except Exception as e:
+                        print(f"Warning: Failed to get embedding for message, using None: {e}")
+                        embedding = None
+                    # Store as [speaker, content, clip_id, embedding]
+                    formatted_messages.append([speaker, content, clip_id, embedding])
+            
+            conversation = Conversation(clip_id=clip_id, messages=formatted_messages)
             self.conversations[conversation.id] = conversation
             self.current_conversation_id = conversation.id
             return conversation.id
@@ -644,6 +664,7 @@ class HeteroGraph:
             edge.embedding = embedding
         print(len(embeddings), "embeddings inserted")
 
+
     # --------------------------------------------------------
     # Abstract Information API
     # --------------------------------------------------------
@@ -843,6 +864,161 @@ class HeteroGraph:
         
         return relationships_created
 
+    def extract_conversation_summary(self, conversation_id):
+        """
+        Extract abstract information from a conversation.
+        
+        This function:
+        1. Gets the conversation from self.conversations
+        2. Transforms messages into formatted string
+        3. Combines with prompt_conversation_summary
+        4. Uses LLM to generate abstract information (summary, attributes, relationships)
+        5. Updates conversation.summary
+        6. Inserts attributes and relationships as edges in the graph
+        
+        Args:
+            conversation_id: ID of the conversation to process
+        
+        Returns:
+            dict: Dictionary with keys "summary", "character_attributes", "characters_relationships"
+        """
+        # Get the conversation
+        conversation = self.conversations.get(conversation_id)
+        if conversation is None:
+            raise ValueError(f"Conversation with id {conversation_id} not found in graph")
+        
+        if not conversation.messages:
+            # No messages, return empty results
+            return {
+                "summary": "",
+                "character_attributes": [],
+                "characters_relationships": []
+            }
+        
+        # Transform messages into formatted string
+        formatted_messages = conversation.format_messages()
+        
+        # Combine with prompt
+        full_prompt = f"Conversation:\n{formatted_messages}\n\n{prompt_conversation_summary}"
+        
+        # Call LLM
+        try:
+            response = generate_text_response(full_prompt)
+        except Exception as e:
+            print(f"LLM call failed, retrying... Error: {e}")
+            response = generate_text_response(full_prompt)
+        
+        # Parse the LLM response
+        response = strip_code_fences(response)
+        print(response)
+        try:
+            result_dict = json.loads(response)
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse LLM response as JSON: {e}")
+            print(f"Response was: {response}")
+            return {
+                "summary": "",
+                "character_attributes": [],
+                "characters_relationships": []
+            }
+        
+        # Extract the three components
+        summary = result_dict.get("summary", "")
+        character_attributes = result_dict.get("character_attributes", [])
+        characters_relationships = result_dict.get("characters_relationships", [])
+        
+        # Update conversation.summary
+        conversation.summary = summary
+        
+        # Insert character attributes as edges
+        # Format: [character, attribute, confidence_score]
+        # Edge format: source=character, content=attribute, target=None, clip_id=0, confidence=confidence_score
+        for attr_item in character_attributes:
+            if not isinstance(attr_item, list) or len(attr_item) < 3:
+                continue
+            
+            char_name = attr_item[0]
+            attribute = attr_item[1]
+            confidence = attr_item[2]
+            
+            # Only include attributes with confidence >= 50
+            if not isinstance(confidence, (int, float)) or confidence < 50:
+                continue
+            
+            # Normalize character name (add angle brackets if needed)
+            if not char_name.startswith("<") or not char_name.endswith(">"):
+                char_name = f"<{char_name}>"
+            
+            # Verify character exists in graph
+            if char_name not in self.characters:
+                print(f"Warning: Character '{char_name}' not found in graph, skipping attribute: {attribute}")
+                continue
+            
+            # Create attribute edge (high-level edge: clip_id=0, scene=None)
+            edge = Edge(
+                clip_id=0,
+                source=char_name,
+                target=None,
+                content=attribute,
+                scene=None,
+                confidence=confidence
+            )
+            try:
+                self.add_edge(edge)
+            except Exception as e:
+                print(f"Warning: Failed to add attribute edge for {char_name}: {e}")
+        
+        # Insert character relationships as edges
+        # Format: [character1, relationship, character2, confidence_score]
+        # Edge format: source=character1, content=relationship, target=character2, clip_id=0, confidence=confidence_score
+        for rel_item in characters_relationships:
+            if not isinstance(rel_item, list) or len(rel_item) < 4:
+                continue
+            
+            char1 = rel_item[0]
+            relationship = rel_item[1]
+            char2 = rel_item[2]
+            confidence = rel_item[3]
+            
+            # Only include relationships with confidence >= 50
+            if not isinstance(confidence, (int, float)) or confidence < 50:
+                continue
+            
+            # Normalize character names (add angle brackets if needed)
+            if not char1.startswith("<") or not char1.endswith(">"):
+                char1 = f"<{char1}>"
+            if not char2.startswith("<") or not char2.endswith(">"):
+                char2 = f"<{char2}>"
+            
+            # Verify both characters exist in graph
+            if char1 not in self.characters:
+                print(f"Warning: Character '{char1}' not found in graph, skipping relationship")
+                continue
+            if char2 not in self.characters:
+                print(f"Warning: Character '{char2}' not found in graph, skipping relationship")
+                continue
+            
+            # Create relationship edge (high-level edge: clip_id=0, scene=None)
+            edge = Edge(
+                clip_id=0,
+                source=char1,
+                target=char2,
+                content=relationship,
+                scene=None,
+                confidence=confidence
+            )
+            try:
+                self.add_edge(edge)
+            except Exception as e:
+                print(f"Warning: Failed to add relationship edge between {char1} and {char2}: {e}")
+        
+        return {
+            "summary": summary,
+            "character_attributes": character_attributes,
+            "characters_relationships": characters_relationships
+        }
+
+
     # --------------------------------------------------------
     # Search API
     # --------------------------------------------------------
@@ -857,15 +1033,12 @@ class HeteroGraph:
         Returns:
             float: Cosine similarity score between -1 and 1
         """
-        import time
-        start_time = time.time()
         vec1 = np.array(vec1)
         vec2 = np.array(vec2)
         
         dot_product = np.dot(vec1, vec2)
         norm1 = np.linalg.norm(vec1)
         norm2 = np.linalg.norm(vec2)
-        print(f"Time taken: {time.time() - start_time} seconds")
         
         if norm1 == 0 or norm2 == 0:
             return 0.0
@@ -878,7 +1051,7 @@ class HeteroGraph:
         High-level edges represent character attributes and relationships.
         
         Args:
-            query_triples: List of query triples in format [source, content, target] or single triple
+            query_triples: List of query triples in format [source, content, target, source_weight, content_weight, target_weight] or single triple
             k: Number of top results to return
         
         Returns:
@@ -928,65 +1101,82 @@ class HeteroGraph:
                 q_content = q_triple[1] if len(q_triple) > 1 else None
                 q_target = q_triple[2] if len(q_triple) > 2 else None
                 
-                # Content similarity (most important, direction-independent)
+                # Extract weights (default to 1.0 if not provided for backward compatibility)
+                q_source_weight = q_triple[3] if len(q_triple) > 3 and q_triple[3] is not None else 1.0
+                q_content_weight = q_triple[4] if len(q_triple) > 4 and q_triple[4] is not None else 1.0
+                q_target_weight = q_triple[5] if len(q_triple) > 5 and q_triple[5] is not None else 1.0
+                
+                # Normalize weights to sum to 1.0 for proper scaling
+                total_weight = q_source_weight + q_content_weight + q_target_weight
+                if total_weight > 0:
+                    q_source_weight_norm = q_source_weight / total_weight
+                    q_content_weight_norm = q_content_weight / total_weight
+                    q_target_weight_norm = q_target_weight / total_weight
+                else:
+                    q_source_weight_norm = 0.33
+                    q_content_weight_norm = 0.34
+                    q_target_weight_norm = 0.33
+                
+                # Content similarity (direction-independent)
                 content_score = 0.0
                 if q_content and q_content != "?":
                     if edge.content:
                         try:
                             edge_content_emb = get_embedding(edge.content)
                             sim = self._cosine_similarity(query_embeddings[q_content], edge_content_emb)
-                            content_score = sim * 0.50  # Content is most important
+                            content_score = sim * q_content_weight_norm
                         except Exception:
                             # Fallback to exact match
                             if edge.content == q_content:
-                                content_score = 2.0
+                                content_score = q_content_weight_norm * 2.0
                 
-                # Bidirectional entity matching: try both directions and keep the higher score
+                # Bidirectional entity matching: try both directions and keep the higher weighted score
+                # Weights stick with query elements, not positions
                 entity_score = 0.0
                 if (q_source and q_source != "?") or (q_target and q_target != "?"):
-                    normal_direction_score = 0.0
-                    reversed_direction_score = 0.0
+                    # Track similarity scores for q_source and q_target separately
+                    q_source_sim = 0.0
+                    q_target_sim = 0.0
                     
-                    # Normal direction: (query source, edge source) + (query target, edge target)
+                    # Normal direction: (query source, edge source) and (query target, edge target)
                     if q_source and q_source != "?" and edge.source:
                         try:
                             edge_source_emb = get_embedding(edge.source)
-                            sim = self._cosine_similarity(query_embeddings[q_source], edge_source_emb)
-                            normal_direction_score += sim * 0.25
+                            q_source_sim = self._cosine_similarity(query_embeddings[q_source], edge_source_emb)
                         except Exception:
                             if edge.source == q_source:
-                                normal_direction_score += 1.0
+                                q_source_sim = 1.0
                     
                     if q_target and q_target != "?" and edge.target:
                         try:
                             edge_target_emb = get_embedding(str(edge.target))
-                            sim = self._cosine_similarity(query_embeddings[q_target], edge_target_emb)
-                            normal_direction_score += sim * 0.25
+                            q_target_sim = self._cosine_similarity(query_embeddings[q_target], edge_target_emb)
                         except Exception:
                             if str(edge.target) == q_target:
-                                normal_direction_score += 1.0
+                                q_target_sim = 1.0
                     
-                    # Reversed direction: (query source, edge target) + (query target, edge source)
+                    # Reversed direction: (query source, edge target) and (query target, edge source)
+                    # Weights still stick with query elements: q_source_weight stays with q_source match
                     if q_source and q_source != "?" and edge.target:
                         try:
                             edge_target_emb = get_embedding(str(edge.target))
-                            sim = self._cosine_similarity(query_embeddings[q_source], edge_target_emb)
-                            reversed_direction_score += sim * 0.25
+                            reversed_q_source_sim = self._cosine_similarity(query_embeddings[q_source], edge_target_emb)
+                            q_source_sim = max(q_source_sim, reversed_q_source_sim)  # Keep best match for q_source
                         except Exception:
                             if str(edge.target) == q_source:
-                                reversed_direction_score += 1.0
+                                q_source_sim = max(q_source_sim, 1.0)
                     
                     if q_target and q_target != "?" and edge.source:
                         try:
                             edge_source_emb = get_embedding(edge.source)
-                            sim = self._cosine_similarity(query_embeddings[q_target], edge_source_emb)
-                            reversed_direction_score += sim * 0.25
+                            reversed_q_target_sim = self._cosine_similarity(query_embeddings[q_target], edge_source_emb)
+                            q_target_sim = max(q_target_sim, reversed_q_target_sim)  # Keep best match for q_target
                         except Exception:
                             if edge.source == q_target:
-                                reversed_direction_score += 1.0
+                                q_target_sim = max(q_target_sim, 1.0)
                     
-                    # Keep the higher score
-                    entity_score = max(normal_direction_score, reversed_direction_score)
+                    # Apply weights to the best similarities found in either direction
+                    entity_score = q_source_weight_norm * q_source_sim + q_target_weight_norm * q_target_sim
                 
                 score += content_score + entity_score
             
@@ -1061,7 +1251,7 @@ class HeteroGraph:
             return []
         
         # Score edges based on embedding similarity with bidirectional matching
-        # Formula: Similarity = (0.25*source + 0.5*content + 0.25*target) * scene_similarity
+        # Formula: Similarity = (weight_source*source + weight_content*content + weight_target*target) * scene_similarity
         scored_edges = []
         for edge in candidate_edges:
             base_similarity = 0.0
@@ -1071,6 +1261,22 @@ class HeteroGraph:
                 q_source = q_triple[0] if len(q_triple) > 0 else None
                 q_content = q_triple[1] if len(q_triple) > 1 else None
                 q_target = q_triple[2] if len(q_triple) > 2 else None
+                
+                # Extract weights (default to 1.0 if not provided for backward compatibility)
+                q_source_weight = q_triple[3] if len(q_triple) > 3 and q_triple[3] is not None else 1.0
+                q_content_weight = q_triple[4] if len(q_triple) > 4 and q_triple[4] is not None else 1.0
+                q_target_weight = q_triple[5] if len(q_triple) > 5 and q_triple[5] is not None else 1.0
+                
+                # Normalize weights to sum to 1.0 for proper scaling
+                total_weight = q_source_weight + q_content_weight + q_target_weight
+                if total_weight > 0:
+                    q_source_weight_norm = q_source_weight / total_weight
+                    q_content_weight_norm = q_content_weight / total_weight
+                    q_target_weight_norm = q_target_weight / total_weight
+                else:
+                    q_source_weight_norm = 0.25
+                    q_content_weight_norm = 0.5
+                    q_target_weight_norm = 0.25
                 
                 # Calculate source, content, and target similarities with bidirectional matching
                 source_sim = 0.0
@@ -1087,53 +1293,57 @@ class HeteroGraph:
                         if edge.content == q_content:
                             content_sim = 1.0
                 
-                # Bidirectional entity matching: try both directions and keep the higher score
+                # Bidirectional entity matching: try both directions and keep the higher weighted score
+                # Weights stick with query elements, not positions
                 if (q_source and q_source != "?") or (q_target and q_target != "?"):
-                    normal_source_sim = 0.0
-                    normal_target_sim = 0.0
-                    reversed_source_sim = 0.0
-                    reversed_target_sim = 0.0
+                    # Track similarity scores for q_source and q_target separately
+                    q_source_sim = 0.0
+                    q_target_sim = 0.0
                     
                     # Normal direction: (query source, edge source) and (query target, edge target)
                     if q_source and q_source != "?" and edge.source:
                         try:
                             edge_source_emb = get_embedding(edge.source)
-                            normal_source_sim = self._cosine_similarity(query_embeddings[q_source], edge_source_emb)
+                            q_source_sim = self._cosine_similarity(query_embeddings[q_source], edge_source_emb)
                         except Exception:
                             if edge.source == q_source:
-                                normal_source_sim = 1.0
+                                q_source_sim = 1.0
                     
                     if q_target and q_target != "?" and edge.target:
                         try:
                             edge_target_emb = get_embedding(str(edge.target))
-                            normal_target_sim = self._cosine_similarity(query_embeddings[q_target], edge_target_emb)
+                            q_target_sim = self._cosine_similarity(query_embeddings[q_target], edge_target_emb)
                         except Exception:
                             if str(edge.target) == q_target:
-                                normal_target_sim = 1.0
+                                q_target_sim = 1.0
                     
                     # Reversed direction: (query source, edge target) and (query target, edge source)
+                    # Weights still stick with query elements: q_source_weight stays with q_source match
                     if q_source and q_source != "?" and edge.target:
                         try:
                             edge_target_emb = get_embedding(str(edge.target))
-                            reversed_source_sim = self._cosine_similarity(query_embeddings[q_source], edge_target_emb)
+                            reversed_q_source_sim = self._cosine_similarity(query_embeddings[q_source], edge_target_emb)
+                            q_source_sim = max(q_source_sim, reversed_q_source_sim)  # Keep best match for q_source
                         except Exception:
                             if str(edge.target) == q_source:
-                                reversed_source_sim = 1.0
+                                q_source_sim = max(q_source_sim, 1.0)
                     
                     if q_target and q_target != "?" and edge.source:
                         try:
                             edge_source_emb = get_embedding(edge.source)
-                            reversed_target_sim = self._cosine_similarity(query_embeddings[q_target], edge_source_emb)
+                            reversed_q_target_sim = self._cosine_similarity(query_embeddings[q_target], edge_source_emb)
+                            q_target_sim = max(q_target_sim, reversed_q_target_sim)  # Keep best match for q_target
                         except Exception:
                             if edge.source == q_target:
-                                reversed_target_sim = 1.0
+                                q_target_sim = max(q_target_sim, 1.0)
                     
-                    # Keep the higher scores for each component
-                    source_sim = max(normal_source_sim, reversed_target_sim)  # source from normal or target from reversed
-                    target_sim = max(normal_target_sim, reversed_source_sim)  # target from normal or source from reversed
+                    # Use q_source_sim and q_target_sim (already contain best matches in either direction)
+                    source_sim = q_source_sim
+                    target_sim = q_target_sim
                 
-                # Base similarity: 0.25*source + 0.5*content + 0.25*target
-                triple_similarity = 0.25 * source_sim + 0.5 * content_sim + 0.25 * target_sim
+                # Base similarity: weighted sum using query element weights
+                # Weights are correctly applied to their corresponding query elements
+                triple_similarity = q_source_weight_norm * source_sim + q_content_weight_norm * content_sim + q_target_weight_norm * target_sim
                 base_similarity = max(base_similarity, triple_similarity)  # Keep max across all query triples
             
             # Calculate scene similarity
@@ -1162,25 +1372,21 @@ class HeteroGraph:
         return [edge for _, edge in scored_edges[:k]]
     
     
-    def search_conversations(self, query, k, speaker_strict=None, context_window=2):
+    def search_conversations(self, query, k, speaker_strict=None):
         """
-        Search for top-k conversation messages (lines) with context using embedding-based similarity.
-        Returns conversation segments with surrounding messages to keep context (question and answer).
+        Search for top-k conversation messages using embedding-based similarity.
         
         Args:
             query: Query string (natural language question)
-            k: Number of top conversation segments to return
+            k: Number of top messages to return
             speaker_strict: Optional list of speakers to filter by (e.g., ["<Alice>", "<Bob>"])
                           Only return conversations where ALL specified speakers are present
-            context_window: Number of messages before and after to include for context (default: 2)
         
         Returns:
             list: List of dictionaries with format:
                 {
                     "conversation_id": int,
-                    "clip_id": int,
-                    "matched_message_index": int,
-                    "context_messages": [[speaker, text], ...],  # Messages with context
+                    "message_index": int,
                     "score": float
                 }
         """
@@ -1195,7 +1401,7 @@ class HeteroGraph:
             return []
         
         # Search through all conversations
-        scored_segments = []
+        scored_messages = []
         
         for conv_id, conversation in self.conversations.items():
             # Filter by speaker_strict if provided
@@ -1218,20 +1424,28 @@ class HeteroGraph:
                     continue
                 
                 speaker = message[0]
-                text = message[1]
+                content = message[1]  # content is at index 1
                 
-                if not text or not isinstance(text, str):
+                if not content or not isinstance(content, str):
                     continue
                 
-                # Reorganize message to format: "<character>: spoken content"
-                formatted_message = f"{speaker}: {text}"
-                
-                # Calculate embedding similarity for formatted message
+                # Use stored embedding (index 3) - embeddings are pre-computed when messages are added
                 try:
-                    message_embedding = get_embedding(formatted_message)
+                    if len(message) >= 4 and message[3] is not None:
+                        message_embedding = message[3]  # Use stored embedding from message (pre-computed)
+                    else:
+                        # Fallback: compute embedding if not stored (shouldn't happen normally)
+                        # Remove angle brackets from speaker name for embedding consistency
+                        speaker_name = speaker
+                        if speaker_name.startswith("<") and speaker_name.endswith(">"):
+                            speaker_name = speaker_name[1:-1]
+                        formatted_message = f"{speaker_name}: {content}"
+                        message_embedding = get_embedding(formatted_message)
+                    
                     text_similarity = self._cosine_similarity(query_embedding, message_embedding)
                 except Exception:
                     # Fallback to keyword matching
+                    formatted_message = f"{speaker}: {content}"
                     formatted_lower = formatted_message.lower()
                     query_lower = query.lower()
                     if query_lower in formatted_lower or any(word in formatted_lower for word in query_lower.split()):
@@ -1239,28 +1453,134 @@ class HeteroGraph:
                     else:
                         text_similarity = 0.0
                 
-                # Calculate final score (no speaker bonus needed since we search formatted message)
+                # Calculate final score
                 score = text_similarity
                 
                 # Only include messages with positive score
                 if score > 0:
-                    # Get context messages (before and after)
-                    start_idx = max(0, msg_idx - context_window)
-                    end_idx = min(len(conversation.messages), msg_idx + context_window + 1)
-                    context_messages = conversation.messages[start_idx:end_idx]
-                    
-                    # Get clip_id (use first clip if multiple)
-                    clip_id = conversation.clips[0] if conversation.clips else None
-                    
-                    scored_segments.append({
+                    scored_messages.append({
                         "conversation_id": conv_id,
-                        "clip_id": clip_id,
-                        "matched_message_index": msg_idx,
-                        "context_messages": context_messages,
+                        "message_index": msg_idx,
                         "score": score
                     })
         
         # Sort by score (descending) and return top-k
-        scored_segments.sort(key=lambda x: x["score"], reverse=True)
-        return scored_segments[:k]
-
+        scored_messages.sort(key=lambda x: x["score"], reverse=True)
+        return scored_messages[:k]
+    
+    
+    def get_conversation_messages_with_context(self, search_results, context_window=2):
+        """
+        Given the output of search_conversations(), return messages with context window in temporal order.
+        Merges overlapping message ranges to avoid duplicates.
+        
+        Args:
+            search_results: List of dictionaries from search_conversations() with format:
+                {
+                    "conversation_id": int,
+                    "message_index": int,
+                    "score": float
+                }
+            context_window: Number of messages before and after to include for context (default: 2)
+        
+        Returns:
+            str: Formatted string with conversation summaries and messages.
+                Format: "Conversation 1: Summary of the conversation. \nAnna: ... \nSusan: ...\n\nConversation 2: ..."
+        """
+        if not search_results:
+            return ""
+        
+        # Group results by conversation_id
+        conversation_indices = {}
+        for result in search_results:
+            conv_id = result.get("conversation_id")
+            msg_idx = result.get("message_index")
+            if conv_id is None or msg_idx is None:
+                continue
+            
+            if conv_id not in conversation_indices:
+                conversation_indices[conv_id] = []
+            conversation_indices[conv_id].append(msg_idx)
+        
+        # Process each conversation and build formatted string
+        formatted_conversations = []
+        
+        for conv_id, message_indices in conversation_indices.items():
+            # Get the conversation
+            conversation = self.conversations.get(conv_id)
+            if conversation is None:
+                continue
+            
+            if not conversation.messages:
+                continue
+            
+            # Merge overlapping ranges
+            # Create ranges with context window for each matched message
+            ranges = []
+            for msg_idx in message_indices:
+                start_idx = max(0, msg_idx - context_window)
+                end_idx = min(len(conversation.messages), msg_idx + context_window + 1)
+                ranges.append((start_idx, end_idx))
+            
+            # Sort ranges by start index
+            ranges.sort(key=lambda x: x[0])
+            
+            # Merge overlapping ranges
+            merged_ranges = []
+            if ranges:
+                merged_start, merged_end = ranges[0]
+                for start, end in ranges[1:]:
+                    if start <= merged_end:
+                        # Overlapping or adjacent - merge
+                        merged_end = max(merged_end, end)
+                    else:
+                        # Non-overlapping - save current and start new
+                        merged_ranges.append((merged_start, merged_end))
+                        merged_start, merged_end = start, end
+                # Add the last range
+                merged_ranges.append((merged_start, merged_end))
+            
+            # Extract messages from merged ranges
+            all_message_indices = set()
+            for start, end in merged_ranges:
+                all_message_indices.update(range(start, end))
+            
+            # Sort indices to maintain temporal order
+            sorted_indices = sorted(all_message_indices)
+            
+            # Extract messages and format as "[clip_id] Speaker: content"
+            message_lines = []
+            for idx in sorted_indices:
+                if idx < len(conversation.messages):
+                    msg = conversation.messages[idx]
+                    if isinstance(msg, list) and len(msg) >= 2:
+                        speaker = msg[0]
+                        content = msg[1]
+                        clip_id = msg[2] if len(msg) >= 3 and msg[2] is not None else None
+                        
+                        # Remove angle brackets from speaker name
+                        speaker_name = speaker
+                        if speaker_name.startswith("<") and speaker_name.endswith(">"):
+                            speaker_name = speaker_name[1:-1]
+                        
+                        # Format with clip_id: [clip_id] Speaker: content
+                        if clip_id is not None:
+                            message_lines.append(f"[{clip_id}] {speaker_name}: {content}")
+                        else:
+                            # Fallback if clip_id is missing
+                            message_lines.append(f"{speaker_name}: {content}")
+            
+            if message_lines:
+                # Get conversation summary (if available)
+                summary = conversation.summary if hasattr(conversation, 'summary') and conversation.summary else ""
+                
+                # Format: "Conversation {id}: {summary}\n{message1}\n{message2}..."
+                if summary:
+                    conversation_text = f"Conversation {conv_id}: {summary}\n" + "\n".join(message_lines)
+                else:
+                    conversation_text = f"Conversation {conv_id}:\n" + "\n".join(message_lines)
+                
+                formatted_conversations.append(conversation_text)
+        
+        # Join all conversations with double newline separator
+        return "\n\n".join(formatted_conversations)
